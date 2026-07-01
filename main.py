@@ -82,10 +82,15 @@ async def repl() -> None:
     try:
         import httpx
 
-        # We target the root Ollama port dynamically derived from environmental endpoint variable
-        ollama_base = os.getenv("LLM_ENDPOINT", "http://localhost:11434/v1").replace(
-            "/v1", ""
-        )
+        # Use EMBEDDING_ENDPOINT for Ollama check — it always points to local Ollama,
+        # even when LLM_ENDPOINT targets a cloud provider (Gemini, OpenAI, etc.)
+        # Strip any /api/* path to get the base Ollama URL for the health check.
+        embedding_ep = os.getenv("EMBEDDING_ENDPOINT", "http://localhost:11434")
+        # Extract base URL: http://localhost:11434/api/embed -> http://localhost:11434
+        if "/api/" in embedding_ep:
+            ollama_base = embedding_ep[:embedding_ep.index("/api/")]
+        else:
+            ollama_base = embedding_ep.rstrip("/")
         async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{ollama_base}/api/tags",

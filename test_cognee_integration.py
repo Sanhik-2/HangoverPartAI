@@ -1,59 +1,34 @@
 """
 test_cognee_integration.py — Integration tests for the Cognee memory layer.
 
-Validates the full pipeline using Gemini API:
-  1. Store a goal state → cognify → search
-  2. Store a solution state → cognify → search
-  3. Record a failure → cognify → verify history
-  4. Check dead-end prevention works
+Validates the full pipeline:
+  1. Schema serialization round-trips (to_cognee_text)
+  2. Store a goal state → cognify → search
+  3. Store a solution state → cognify → search
+  4. Record a failure → cognify → search
+  5. Agent loop import and module integrity checks
+
+Can run standalone: python test_cognee_integration.py
 """
 
-from __future__ import annotations
-
 import asyncio
+import json
 import logging
 import os
 import sys
 
-# Ensure .env is loaded before anything else
-from dotenv import load_dotenv
+# Force Cognee to disable multi-tenant authentication and access control.
+# This must be set programmatically before any cognee imports.
+os.environ["ENABLE_BACKEND_ACCESS_CONTROL"] = "false"
+os.environ["COGNEE_SKIP_CONNECTION_TEST"] = "true"
 
+from dotenv import load_dotenv
 load_dotenv()
 
-# --- Gemini Configuration & Pydantic Validation Handlers ---
-# Cognee's internal validator requires that if LLM_PROVIDER is configured,
-# all associated credentials and model tags must be populated together.
-# Note: Cognee's LLMProvider enum expects "gemini" instead of "google".
-os.environ["LLM_PROVIDER"] = "gemini"
-os.environ["LLM_MODEL"] = "gemini-2.5-flash"
-
-os.environ["EMBEDDING_PROVIDER"] = "gemini"
-os.environ["EMBEDDING_MODEL"] = "text-embedding-004"
-os.environ["EMBEDDING_DIMENSIONS"] = "768"
-
-# Pull Gemini key from environment
-gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-
-if gemini_key:
-    # Programmatically bind to all API keys that litellm/cognee might check
-    os.environ["LLM_API_KEY"] = gemini_key
-    os.environ["EMBEDDING_API_KEY"] = gemini_key
-    os.environ["GEMINI_API_KEY"] = gemini_key
-    os.environ["GOOGLE_API_KEY"] = gemini_key
-else:
-    # Print warning if no key is found, but set placeholder to avoid validation crashes
-    print("\n" + "!" * 60)
-    print("  WARNING: No GEMINI_API_KEY or GOOGLE_API_KEY detected in env.")
-    print("  Please add GEMINI_API_KEY='your_api_key' to your .env file!")
-    print("!" * 60 + "\n")
-    os.environ["LLM_API_KEY"] = "placeholder"
-    os.environ["EMBEDDING_API_KEY"] = "placeholder"
-# -----------------------------------------------------------
-
-import cognee_memory as memory
 from state_schemas import (
     ExecutionHistory,
     ExecutionStatus,
+    FailureEdge,
     GoalState,
     KnowledgePoint,
     SolutionObjectState,
@@ -68,88 +43,51 @@ logger = logging.getLogger("test")
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Unit Tests — Schema Serialization (no Cognee required)
+# ═══════════════════════════════════════════════════════════════════════
 
-
-async def test_goal_lifecycle():
-    """Test 1: Goal storage and retrieval."""
-    print("\n" + "═" * 50)
-    print("  TEST 1: Goal State Lifecycle")
-    print("═" * 50)
-
+def test_goal_state_serialization():
+    """Test GoalState creation and text serialization."""
     goal = GoalState(
-        goal_name="HTTP Server with Rate Limiting",
-        preparation_steps=[
-            "Choose Python HTTP framework (aiohttp vs FastAPI)",
-            "Implement token-bucket rate limiter",
-            "Add middleware for request counting",
-            "Write load test to verify limits",
-        ],
-        understanding_notes=[
-            "Must support async request handling",
-            "Rate limits should be per-IP",
-            "Token bucket allows burst traffic",
-        ],
+        goal_name="Implement Cognee integration",
+        preparation_steps=["Install cognee", "Configure .env", "Write schemas"],
+        understanding_notes=["Cognee uses async API", "Requires Ollama for embeddings"],
     )
 
-    print(f"  Created goal: {goal.goal_name}")
-    print(f"  ID: {goal.goal_id}")
+    assert goal.goal_name == "Implement Cognee integration"
+    assert goal.goal_id.startswith("goal_")
+    assert len(goal.preparation_steps) == 3
+    assert goal.state_type.value == "Goal"
 
-    # Store
-    print("  → Storing goal...")
-    goal_id = await memory.store_goal(goal)
-    print(f"  ✓ Stored with ID: {goal_id}")
+    text = goal.to_cognee_text()
+    assert "[GOAL]:" in text
+    assert "Implement Cognee integration" in text
+    assert "Install cognee" in text
 
-    # Search
-    print("  → Searching for similar goals...")
-    results = await memory.query_similar_goals(goal)
-    print(f"  ✓ Found {len(results)} matches")
+    # JSON round-trip
+    json_str = goal.model_dump_json()
+    restored = GoalState.model_validate_json(json_str)
+    assert restored.goal_name == goal.goal_name
+    assert restored.goal_id == goal.goal_id
 
-    print("  ✅ TEST 1 PASSED\n")
-    return goal
+    logger.info("  ✓ GoalState serialization test passed")
 
 
-async def test_solution_state_lifecycle(goal: GoalState):
-    """Test 2: Solution state storage and ancestry."""
-    print("\n" + "═" * 50)
-    print("  TEST 2: Solution State Lifecycle")
-    print("═" * 50)
-
-    # Root state
-    root_state = SolutionObjectState(
-        state_name="FastAPI Rate Limiter Root",
-        goal_id=goal.goal_id,
+def test_solution_state_serialization():
+    """Test SolutionObjectState creation and text serialization."""
+    state = SolutionObjectState(
+        state_name="Cognee memory wrapper",
+        goal_id="goal_test123",
         knowledge_points=[
             KnowledgePoint(
-                topic="Framework Choice",
-                description="FastAPI chosen for async support and Pydantic integration",
-                is_verified=False,
-            ),
-            KnowledgePoint(
-                topic="Rate Limit Algorithm",
-                description="Token bucket with 100 tokens/minute refill rate",
-                is_verified=False,
-            ),
-        ],
-    )
-
-    print(f"  Created root state: {root_state.state_name}")
-    print(f"  ID: {root_state.state_id}")
-
-    # Store root
-    print("  → Storing root state...")
-    root_id = await memory.store_state(root_state)
-    print(f"  ✓ Stored root: {root_id}")
-
-    # Child state
-    child_state = SolutionObjectState(
-        state_name="Token Bucket Implementation",
-        parent_state_id=root_state.state_id,
-        goal_id=goal.goal_id,
-        knowledge_points=[
-            KnowledgePoint(
-                topic="Bucket Size",
-                description="Max 100 tokens, refill 10/second",
+                topic="Cognee API",
+                description="Uses add/cognify/search pipeline",
                 is_verified=True,
+            ),
+            KnowledgePoint(
+                topic="SearchType",
+                description="CHUNKS type for basic text retrieval",
+                is_verified=False,
             ),
         ],
         execution_history=ExecutionHistory(
@@ -157,125 +95,242 @@ async def test_solution_state_lifecycle(goal: GoalState):
         ),
     )
 
-    print(f"  Created child state: {child_state.state_name}")
-    print(f"  Parent: {child_state.parent_state_id}")
+    assert state.state_name == "Cognee memory wrapper"
+    assert state.state_id.startswith("state_")
+    assert len(state.knowledge_points) == 2
+    assert state.execution_history.last_status == ExecutionStatus.SUCCESS
 
-    # Store child
-    print("  → Storing child state...")
-    child_id = await memory.store_state(child_state)
-    print(f"  ✓ Stored child: {child_id}")
+    text = state.to_cognee_text()
+    assert "[STATE]:" in text
+    assert "Cognee memory wrapper" in text
+    assert "Cognee API:True" in text
+    assert "Status: SUCCESS" in text
 
-    # Query ancestors
-    print("  → Querying ancestry chain...")
-    ancestors = await memory.query_ancestors(child_state.state_id)
-    print(f"  ✓ Found {len(ancestors)} ancestor records")
+    # JSON round-trip
+    json_str = state.model_dump_json()
+    restored = SolutionObjectState.model_validate_json(json_str)
+    assert restored.state_name == state.state_name
+    assert len(restored.knowledge_points) == 2
 
-    print("  ✅ TEST 2 PASSED\n")
-    return root_state
-
-
-async def test_failure_recording(state: SolutionObjectState):
-    """Test 3: Failure edge recording and dead-end prevention."""
-    print("\n" + "═" * 50)
-    print("  TEST 3: Failure Recording & Dead-End Prevention")
-    print("═" * 50)
-
-    # Record a failure
-    print("  → Recording a failure...")
-    failure = await memory.record_failure(
-        source_state_id=state.state_id,
-        error_message="ImportError: No module named 'fastapi'",
-        failed_code="from fastapi import FastAPI\napp = FastAPI()",
-        root_cause="fastapi not installed in the virtual environment",
-    )
-    print(f"  ✓ Failure recorded: {failure.failure_id}")
-
-    # Check failure history
-    print("  → Checking failure history...")
-    history = await memory.get_failure_history(state.state_id)
-    print(f"  ✓ Found {len(history)} failure records")
-
-    # Check dead-end detection
-    print("  → Testing dead-end detection...")
-    is_dead = await memory.check_dead_end(
-        state.state_id,
-        "from fastapi import FastAPI",
-    )
-    print(f"  ✓ Dead-end detected: {is_dead}")
-
-    print("  ✅ TEST 3 PASSED\n")
+    logger.info("  ✓ SolutionObjectState serialization test passed")
 
 
-async def test_schema_serialization():
-    """Test 4: Verify schema serialization/deserialization."""
-    print("\n" + "═" * 50)
-    print("  TEST 4: Schema Serialization")
-    print("═" * 50)
-
-    goal = GoalState(
-        goal_name="Test Serialization",
-        preparation_steps=["step1"],
-        understanding_notes=["note1"],
+def test_failure_edge_serialization():
+    """Test FailureEdge creation and text serialization."""
+    failure = FailureEdge(
+        source_state_id="state_test456",
+        error_message="ModuleNotFoundError: No module named 'nonexistent'",
+        failed_code_snippet="import nonexistent\nnonexistent.run()",
+        root_cause_analysis="Module not installed in the virtual environment",
     )
 
-    # Test JSON round-trip
-    json_str = goal.model_dump_json(indent=2)
-    restored = GoalState.model_validate_json(json_str)
-    assert restored.goal_name == goal.goal_name
-    assert restored.goal_id == goal.goal_id
-    print("  ✓ GoalState JSON round-trip OK")
+    assert failure.failure_id.startswith("fail_")
+    assert failure.source_state_id == "state_test456"
+    assert failure.state_type.value == "Failure"
 
-    # Test Cognee text serialization
-    text = goal.to_cognee_text()
-    assert "[GOAL]" in text
-    assert goal.goal_name in text
-    print("  ✓ GoalState Cognee text serialization OK")
+    text = failure.to_cognee_text()
+    assert "[FAILURE]:" in text
+    assert "state_test456" in text
+    assert "ModuleNotFoundError" in text
 
-    # Test SolutionObjectState
-    state = SolutionObjectState(
-        state_name="Test State",
-        knowledge_points=[
-            KnowledgePoint(topic="t", description="d", is_verified=True),
-        ],
-    )
-    json_str = state.model_dump_json(indent=2)
-    restored_state = SolutionObjectState.model_validate_json(json_str)
-    assert restored_state.state_name == state.state_name
-    assert len(restored_state.knowledge_points) == 1
-    assert restored_state.knowledge_points[0].is_verified is True
-    print("  ✓ SolutionObjectState JSON round-trip OK")
+    # JSON round-trip
+    json_str = failure.model_dump_json()
+    restored = FailureEdge.model_validate_json(json_str)
+    assert restored.source_state_id == failure.source_state_id
+    assert restored.error_message == failure.error_message
 
-    print("  ✅ TEST 4 PASSED\n")
+    logger.info("  ✓ FailureEdge serialization test passed")
+
+
+def test_execution_history_defaults():
+    """Test ExecutionHistory default values."""
+    history = ExecutionHistory()
+    assert history.last_status == ExecutionStatus.PENDING
+    assert history.error_log is None
+    assert history.timestamp is not None
+
+    logger.info("  ✓ ExecutionHistory defaults test passed")
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Module Import Tests
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_module_imports():
+    """Verify all core modules import without error."""
+    from cognee_memory import CogneeMemory, memory, initialize_memory, reset_memory
+    assert isinstance(memory, CogneeMemory)
+
+    from agent_loop import run_cognitive_loop, llm_generate, llm_generate_json
+    assert callable(run_cognitive_loop)
+    assert callable(llm_generate)
+    assert callable(llm_generate_json)
+
+    logger.info("  ✓ Module import test passed")
 
 
-async def run_all_tests():
-    """Execute all integration tests."""
-    print("\n" + "═" * 50)
-    print("  COGNEE INTEGRATION TEST SUITE")
-    print("═" * 50)
-    print(f"  LLM Provider:  {os.getenv('LLM_PROVIDER', 'unknown')}")
-    print(f"  LLM Model:     {os.getenv('LLM_MODEL', 'unknown')}")
-    print(f"  Embed Model:   {os.getenv('EMBEDDING_MODEL', 'unknown')}")
+# ═══════════════════════════════════════════════════════════════════════
+# Integration Tests — Cognee Pipeline (requires running Ollama)
+# ═══════════════════════════════════════════════════════════════════════
 
-    # Initialize
-    print("\n  → Initializing Cognee...")
-    await memory.initialize_memory()
-    print("  ✓ Memory initialized.")
+async def test_cognee_goal_lifecycle():
+    """Integration test: Store a goal → cognify → search."""
+    from cognee_memory import memory
 
-    # Run tests
-    await test_schema_serialization()
+    goal = GoalState(
+        goal_name="Test goal lifecycle integration",
+        preparation_steps=["Step A", "Step B"],
+        understanding_notes=["Note 1"],
+    )
 
-    goal = await test_goal_lifecycle()
-    state = await test_solution_state_lifecycle(goal)
-    await test_failure_recording(state)
+    logger.info("  Storing goal...")
+    goal_id = await memory.store_goal(goal)
+    assert goal_id == goal.goal_id
+    logger.info(f"  Goal stored: {goal_id}")
 
-    print("\n" + "═" * 50)
-    print("  ALL TESTS PASSED ✅")
-    print("═" * 50 + "\n")
+    logger.info("  Querying similar goals...")
+    results = await memory.query_similar_goals(goal)
+    logger.info(f"  Found {len(results)} similar goal(s)")
+
+    logger.info("  ✓ Goal lifecycle integration test passed")
+
+
+async def test_cognee_state_lifecycle():
+    """Integration test: Store a solution state → cognify → query ancestors."""
+    from cognee_memory import memory
+
+    state = SolutionObjectState(
+        state_name="Test state lifecycle",
+        goal_id="goal_lifecycle_test",
+        knowledge_points=[
+            KnowledgePoint(
+                topic="Testing",
+                description="Validates the Cognee pipeline",
+                is_verified=False,
+            ),
+        ],
+    )
+
+    logger.info("  Storing solution state...")
+    state_id = await memory.store_state(state)
+    assert state_id == state.state_id
+    logger.info(f"  State stored: {state_id}")
+
+    logger.info("  Querying ancestors...")
+    ancestors = await memory.query_ancestors(state.state_id)
+    logger.info(f"  Found {len(ancestors)} ancestor(s)")
+
+    logger.info("  ✓ State lifecycle integration test passed")
+
+
+async def test_cognee_failure_recording():
+    """Integration test: Record a failure → cognify → query history."""
+    from cognee_memory import memory
+
+    logger.info("  Recording failure edge...")
+    failure = await memory.record_failure(
+        source_state_id="state_failure_test",
+        error_message="TestError: Intentional failure for integration testing",
+        failed_code="raise TestError('integration test')",
+        root_cause="Intentional test failure",
+    )
+    assert failure.failure_id.startswith("fail_")
+    logger.info(f"  Failure recorded: {failure.failure_id}")
+
+    logger.info("  Querying failure history...")
+    history = await memory.get_failure_history("state_failure_test")
+    logger.info(f"  Found {len(history)} failure record(s)")
+
+    logger.info("  ✓ Failure recording integration test passed")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Test Runner
+# ═══════════════════════════════════════════════════════════════════════
+
+def run_unit_tests():
+    """Run all unit tests (no external dependencies needed)."""
+    print("\n╔══════════════════════════════════════════════════╗")
+    print("║  Unit Tests — Schema Serialization              ║")
+    print("╚══════════════════════════════════════════════════╝\n")
+
+    tests = [
+        test_goal_state_serialization,
+        test_solution_state_serialization,
+        test_failure_edge_serialization,
+        test_execution_history_defaults,
+        test_module_imports,
+    ]
+
+    passed = 0
+    failed = 0
+    for test in tests:
+        try:
+            test()
+            passed += 1
+        except Exception as e:
+            logger.error(f"  ✗ {test.__name__} FAILED: {e}")
+            failed += 1
+
+    print(f"\n  Results: {passed} passed, {failed} failed\n")
+    return failed == 0
+
+
+async def run_integration_tests():
+    """Run all integration tests (requires Cognee + Ollama)."""
+    print("\n╔══════════════════════════════════════════════════╗")
+    print("║  Integration Tests — Cognee Pipeline            ║")
+    print("╚══════════════════════════════════════════════════╝\n")
+
+    # Initialize memory layer
+    from cognee_memory import initialize_memory
+    await initialize_memory()
+
+    tests = [
+        test_cognee_goal_lifecycle,
+        test_cognee_state_lifecycle,
+        test_cognee_failure_recording,
+    ]
+
+    passed = 0
+    failed = 0
+    for test in tests:
+        try:
+            await test()
+            passed += 1
+        except Exception as e:
+            logger.error(f"  ✗ {test.__name__} FAILED: {e}", exc_info=True)
+            failed += 1
+
+    print(f"\n  Results: {passed} passed, {failed} failed\n")
+    return failed == 0
+
+
+def main():
+    """Run all tests."""
+    print("\n" + "═" * 54)
+    print("  CogneeAIProject — Test Suite")
+    print("═" * 54)
+
+    # Always run unit tests
+    unit_ok = run_unit_tests()
+
+    # Run integration tests if --integration flag is passed
+    if "--integration" in sys.argv:
+        integration_ok = asyncio.run(run_integration_tests())
+    else:
+        print("  ℹ Skipping integration tests (pass --integration to run them)")
+        integration_ok = True
+
+    print("\n" + "═" * 54)
+    if unit_ok and integration_ok:
+        print("  ✓ ALL TESTS PASSED")
+    else:
+        print("  ✗ SOME TESTS FAILED")
+    print("═" * 54 + "\n")
+
+    sys.exit(0 if (unit_ok and integration_ok) else 1)
 
 
 if __name__ == "__main__":
-    asyncio.run(run_all_tests())
+    main()

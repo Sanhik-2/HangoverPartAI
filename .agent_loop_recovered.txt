@@ -1,0 +1,2 @@
+"\"\"\"\nagent_loop.py — Three-phase cognitive loop for the State-Driven Developer Agent.\n\nImplements the deterministic state machine that structures learning,\nbreakthroughs, and failures into the Cognee knowledge graph.\n\nPhase 1: Intent Deconstruct
+<truncated 18377 bytes>
