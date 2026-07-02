@@ -25,19 +25,27 @@ from state_schemas import FailureEdge, GoalState, SolutionObjectState
 logger = logging.getLogger("cognee_memory")
 
 
-def _get_ollama_llm_config() -> LLMConfig:
-    """Build an Ollama-based LLMConfig for Cognee's internal graph extraction.
+def _get_groq_llm_config() -> LLMConfig:
+    """Build a Groq-based LLMConfig for Cognee's internal graph extraction.
 
     Cognee's cognify() pipeline uses `instructor` for structured output,
-    which requires full OpenAI function-calling support. Gemini's OpenAI
-    compatibility gateway doesn't support this, causing MALFORMED_FUNCTION_CALL
-    errors. We route Cognee's internal LLM calls through local Ollama instead.
+    which requires full OpenAI function-calling support. Groq natively
+    supports function-calling and structured output, making it compatible
+    with instructor — unlike Gemini's gateway which caused
+    MALFORMED_FUNCTION_CALL errors.
+
+    Groq's API is OpenAI-compatible, so we use provider="openai" with
+    Groq's endpoint.
     """
+    model = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+    # Prefix with openai/ so litellm knows to use the OpenAI adapter
+    if not model.startswith("openai/"):
+        model = f"openai/{model}"
     return LLMConfig(
-        llm_provider="ollama",
-        llm_model="ollama/llama3.1:8b",
-        llm_endpoint="http://localhost:11434/v1",
-        llm_api_key="ollama",
+        llm_provider="openai",
+        llm_model=model,
+        llm_endpoint=os.getenv("LLM_ENDPOINT", "https://api.groq.com/openai/v1"),
+        llm_api_key=os.getenv("LLM_API_KEY", ""),
     )
 
 # ─── Robust Version-Agnostic SearchType Import Cascade ────────────────
@@ -77,7 +85,7 @@ class CogneeMemory:
 
         logger.info(f"Storing goal: {goal.goal_name} ({goal.goal_id})")
         await cognee.add(combined, dataset_name=GOALS_DATASET)
-        await cognee.cognify(datasets=[GOALS_DATASET], llm_config=_get_ollama_llm_config())
+        await cognee.cognify(datasets=[GOALS_DATASET], llm_config=_get_groq_llm_config(), chunks_per_batch=1)
         logger.info(f"Goal {goal.goal_id} committed to graph.")
         return goal.goal_id
 
@@ -100,7 +108,7 @@ class CogneeMemory:
 
         logger.info(f"Storing solution state: {state.state_name} ({state.state_id})")
         await cognee.add(combined, dataset_name=STATES_DATASET)
-        await cognee.cognify(datasets=[STATES_DATASET], llm_config=_get_ollama_llm_config())
+        await cognee.cognify(datasets=[STATES_DATASET], llm_config=_get_groq_llm_config(), chunks_per_batch=1)
         logger.info(f"Solution state {state.state_id} committed.")
         return state.state_id
 
@@ -146,7 +154,7 @@ class CogneeMemory:
 
         logger.info(f"Recording failure edge for state: {source_state_id}")
         await cognee.add(combined, dataset_name=FAILURES_DATASET)
-        await cognee.cognify(datasets=[FAILURES_DATASET], llm_config=_get_ollama_llm_config())
+        await cognee.cognify(datasets=[FAILURES_DATASET], llm_config=_get_groq_llm_config(), chunks_per_batch=1)
         return failure
 
 

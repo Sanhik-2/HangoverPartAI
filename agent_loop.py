@@ -71,8 +71,9 @@ async def llm_generate(prompt: str, system_prompt: str = "") -> str:
             kwargs["model"] = f"ollama/{model}" if not model.startswith("ollama/") else model
             kwargs["api_base"] = endpoint.rstrip("/v1").rstrip("/")
         else:
-            # Cloud provider (openai, gemini via OpenAI gateway, etc.)
-            kwargs["model"] = model
+            # Cloud provider (Groq via OpenAI-compatible API, OpenAI, etc.)
+            # litellm needs the "openai/" prefix to know which adapter to use
+            kwargs["model"] = f"openai/{model}" if not model.startswith("openai/") else model
             kwargs["api_base"] = endpoint.rstrip("/")
             if api_key:
                 kwargs["api_key"] = api_key

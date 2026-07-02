@@ -55,7 +55,7 @@ BANNER = r"""
 ║   ╚══════╝   ╚═╝   ╚═╝  ╚═╝   ╚═╝   ╚══════╝                ║
 ║                                                              ║
 ║   State-Driven Developer Agent                               ║
-║   Cognee Knowledge Graph + Ollama LLM                        ║
+║   Cognee Knowledge Graph + Groq Cloud LLM                    ║
 ║                                                              ║
 ║   Commands:                                                  ║
 ║     /reset   — Wipe all memory and start fresh               ║
@@ -77,13 +77,55 @@ async def repl() -> None:
 
     print(BANNER)
 
-    # Check Ollama connectivity
-    print("  Checking Ollama connectivity...")
-    try:
-        import httpx
+    import httpx
 
-        # Use EMBEDDING_ENDPOINT for Ollama check — it always points to local Ollama,
-        # even when LLM_ENDPOINT targets a cloud provider (Gemini, OpenAI, etc.)
+    # ── Check Cloud LLM connectivity ──
+    llm_provider = os.getenv("LLM_PROVIDER", "openai")
+    llm_endpoint = os.getenv("LLM_ENDPOINT", "https://api.groq.com/openai/v1")
+    llm_api_key = os.getenv("LLM_API_KEY", "")
+    llm_model = os.getenv("LLM_MODEL", "llama-3.1-8b-instant")
+
+    # Detect Groq from endpoint URL (provider is labeled 'openai' for Cognee compatibility)
+    is_groq = "groq.com" in llm_endpoint
+    provider_display = "GROQ" if is_groq else llm_provider.upper()
+
+    print(f"  Checking {provider_display} LLM connectivity...")
+    if is_groq:
+        if not llm_api_key or llm_api_key == "YOUR_GROQ_API_KEY_HERE":
+            print("  ❌ Groq API key not configured!")
+            print("    1. Sign up at https://console.groq.com (free, no credit card)")
+            print("    2. Generate an API key")
+            print("    3. Paste it into .env as LLM_API_KEY=gsk_...")
+            return
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{llm_endpoint.rstrip('/')}/models",
+                    headers={"Authorization": f"Bearer {llm_api_key}"},
+                    timeout=10.0,
+                )
+                if resp.status_code == 200:
+                    models = resp.json().get("data", [])
+                    model_ids = [m.get("id", "") for m in models]
+                    if llm_model in model_ids:
+                        print(f"  ✓ {provider_display} connected — model '{llm_model}' available")
+                    else:
+                        print(f"  ✓ {provider_display} connected — {len(models)} model(s) available")
+                        print(f"    ⚠ Configured model '{llm_model}' not found in list")
+                else:
+                    print(f"  ❌ {provider_display} API returned status {resp.status_code}")
+                    print(f"    Check your API key in .env")
+                    return
+        except Exception as e:
+            print(f"  ❌ Cannot reach {provider_display} API: {e}")
+            return
+    else:
+        print(f"  ℹ Using provider '{llm_provider}' — skipping Groq-specific check")
+
+    # ── Check Ollama connectivity (needed for embeddings) ──
+    print("  Checking Ollama connectivity (embeddings)...")
+    try:
+        # Use EMBEDDING_ENDPOINT for Ollama check — it always points to local Ollama.
         # Strip any /api/* path to get the base Ollama URL for the health check.
         embedding_ep = os.getenv("EMBEDDING_ENDPOINT", "http://localhost:11434")
         # Extract base URL: http://localhost:11434/api/embed -> http://localhost:11434
@@ -97,18 +139,19 @@ async def repl() -> None:
                 timeout=5.0,
             )
             models = resp.json().get("models", [])
-            if models:
-                print(f"  ✓ Ollama connected — {len(models)} model(s) available:")
-                for m in models:
-                    size_gb = m.get("size", 0) / (1024**3)
-                    print(f"    • {m['name']} ({size_gb:.2f} GB)")
+            embed_model = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+            model_names = [m.get("name", "") for m in models]
+            if any(embed_model in name for name in model_names):
+                print(f"  ✓ Ollama connected — embedding model '{embed_model}' available")
+            elif models:
+                print(f"  ✓ Ollama connected — {len(models)} model(s) available")
+                print(f"    ⚠ Embedding model '{embed_model}' not found. Run: ollama pull {embed_model}")
             else:
-                print("  ⚠ Ollama connected but no model signatures found!")
-                print("    Recommended for your system profile (8GB RAM):")
-                print("    Run: ollama pull qwen2.5:3b && ollama pull nomic-embed-text")
+                print("  ⚠ Ollama connected but no models found.")
+                print(f"    Run: ollama pull {embed_model}")
     except Exception as e:
-        print(f"  ❌ Cannot reach Ollama execution context: {e}")
-        print("    Please ensure Ollama is active. Run: ollama serve")
+        print(f"  ❌ Cannot reach Ollama (needed for embeddings): {e}")
+        print("    Please ensure Ollama is running: ollama serve")
         return
 
     # Initialize Cognee
@@ -149,21 +192,25 @@ async def repl() -> None:
                     print("  Cancelled.\n")
 
             elif cmd == "/status":
-                print("\n  ── Cognee Status ──")
+                print("\n  ── Agent Status ──")
+                _provider = os.getenv('LLM_PROVIDER', 'openai')
+                _endpoint = os.getenv('LLM_ENDPOINT', '')
+                _display = "GROQ" if "groq.com" in _endpoint else _provider.upper()
+                print(f"  LLM Provider:   {_display}")
                 print(
-                    f"  LLM Provider:   {os.getenv('LLM_PROVIDER', 'ollama (local)')}"
+                    f"  LLM Model:      {os.getenv('LLM_MODEL', 'llama-3.1-8b-instant')}"
                 )
                 print(
-                    f"  LLM Model:      {os.getenv('LLM_MODEL', 'qwen2.5:3b (optimized)')}"
+                    f"  LLM Endpoint:   {os.getenv('LLM_ENDPOINT', 'https://api.groq.com/openai/v1')}"
+                )
+                api_key = os.getenv('LLM_API_KEY', '')
+                key_display = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else '(not set)'
+                print(f"  API Key:        {key_display}")
+                print(
+                    f"  Embed Model:    {os.getenv('EMBEDDING_MODEL', 'nomic-embed-text')} (local Ollama)"
                 )
                 print(
-                    f"  LLM Endpoint:   {os.getenv('LLM_ENDPOINT', 'http://localhost:11434/v1')}"
-                )
-                print(
-                    f"  Embed Model:    {os.getenv('EMBEDDING_MODEL', 'nomic-embed-text')}"
-                )
-                print(
-                    f"  Embed Endpoint: {os.getenv('EMBEDDING_ENDPOINT', 'http://localhost:11434/v1')}"
+                    f"  Embed Endpoint: {os.getenv('EMBEDDING_ENDPOINT', 'http://localhost:11434/api/embed')}"
                 )
                 print()
 
